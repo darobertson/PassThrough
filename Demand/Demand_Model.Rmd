@@ -99,28 +99,31 @@ knitr::opts_chunk$set(message=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=60),
 ##Step 1:
 ```{r directory and data, echo=F}
 # Set directory and load the data
-  dir_data = "../../media/xlin0/share/Data/Nielsen/RMS-Build-2016/"
+  dir_data = "~/PassThrough/Data/RMS-Build-2016/"
   module = 1393
   # module = 1340
   
 # Load meta_data
   load(paste0(dir_data, "Meta-Data/Meta-Data-Corrected.RData"))
-  meta_data = setDT(meta_data)[product_module_code==module, 
-                               .(upc, upc_ver_uc, revenue_RMS, N_weeks_RMS)]
+  meta_data = setDT(meta_data)[product_module_code==module, .(upc, upc_ver_uc_corrected, revenue_RMS, N_weeks_RMS)]
+  meta_data = meta_data[, .(productRev = sum(revenue_RMS), productWeek = sum(N_weeks_RMS)),
+                        by = c("upc", "upc_ver_uc_corrected")]
+  setkey(meta_data, upc, upc_ver_uc_corrected)
   
 # Load the product data, convert units to ounce  
   load(paste0(dir_data, "Meta-Data/Products-Corrected.RData"))
   product_data = setDT(products)[product_module_code==module]
   product_data[size1_units == "PO", `:=`(size1_amount = size1_amount*16, size1_units = "OZ" )]
-  product_data = product_data[size1_units=="OZ"][,.(upc, upc_ver_uc, upc_ver_uc_corrected, brand_descr_corrected,
-                                                    size1_amount, multi)]  
+  product_data = setDT(product_data)[size1_units=="OZ",.(upc, upc_ver_uc, upc_ver_uc_corrected, 
+                                                         brand_descr_corrected, size1_amount, multi)]
+  product_data = product_data[, .(brand_descr_corrected = brand_descr_corrected[1],
+                                  size1_amount = size1_amount[1], multi=multi[1]),
+                              by = c("upc", "upc_ver_uc_corrected")]
   
 # Merge data; find the top brand
-  product_revenue = merge(product_data, meta_data, by = c("upc", "upc_ver_uc"))
-  product_revenue = product_revenue[, c("productRev", "productWeek") := lapply(.SD, sum), 
-                                      .SDcols = c("revenue_RMS","N_weeks_RMS"), 
-                                      by = .(upc, upc_ver_uc_corrected)]
-  revenue = product_revenue[, .(brand_revenue = sum(revenue_RMS)), by = brand_descr_corrected]
+  setkey(product_data, upc, upc_ver_uc_corrected)
+  product_data = meta_data[product_data]
+  revenue = product_data[, .(brand_revenue = sum(productRev, na.rm=TRUE)), by = .(brand_descr_corrected)]
   top_brand = revenue[order(-brand_revenue), brand_descr_corrected][1:10]
   #save(top_brand, file="../../media/xlin0/share/xl150/top_brand_1393.RData")
 ```
@@ -128,15 +131,17 @@ knitr::opts_chunk$set(message=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=60),
 ```{r movement data}
 # Movement data  
   all_move_file = list.files(paste0(dir_data, "RMS-Processed/Modules/", module))
-  all_move = data.table(NULL)
-  
+  all_move = as.list(1:length(all_move_file))
+  k = 0
   for (i in all_move_file){
+    k = k+1
     load(paste0(dir_data, "RMS-Processed/Modules/", module, "/", i))
     move = move[!(is.na(base_price)|is.na(imputed_price))]
     move[, `:=`(store_rev = sum(units*imputed_price, na.rm=T)), by = .(upc, upc_ver_uc_corrected, store_code_uc)]
   
-    setkey(product_data, upc, upc_ver_uc)
-    setkey(move, upc, upc_ver_uc)
+    setkey(product_data, upc, upc_ver_uc_corrected)
+    setkey(move, upc, upc_ver_uc_corrected)
+    # Half of the data is gone!
     move = move[product_data, nomatch=0L]
   
   # Obtain per unit price and units
@@ -146,88 +151,93 @@ knitr::opts_chunk$set(message=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=60),
   # Aggregate price to brand level (only consider top brands)
     move[!(brand_descr_corrected %in% top_brand), brand_descr_corrected := "OTHER"]
 
-    move = move[, .(base_cum= sum(store_rev*base_price, na.rm=T),
+    all_move[[k]] = move[, .(base_cum= sum(store_rev*base_price, na.rm=T),
                     imputed_cum = sum(store_rev*imputed_price, na.rm=T),
-                    wts_cum = sum(store_rev, na.rm=T),
+                    wts_cum = sum(store_rev*(!is.na(imputed_price)), na.rm=T),
                     units = sum(units, na.rm=T)), 
                   by = .(brand_descr_corrected, store_code_uc, week_end)]
-  
-  # Bind the data together
-    all_move = rbindlist(list(all_move, move))
-  
-  # Aggregate to brand level
-    all_move = all_move[, .(base_cum= sum(base_cum, na.rm=T),
+  }
+  all_move = rbindlist(all_move)[, .(base_cum= sum(base_cum, na.rm=T),
                             imputed_cum = sum(imputed_cum, na.rm=T),
                             wts_cum = sum(wts_cum, na.rm=T),
                             units = sum(units, na.rm=T)), 
                         by = .(brand_descr_corrected, store_code_uc, week_end)]
-  }
-  save(all_move, file="../../media/xlin0/share/xl150/move2_1340.RData")
+  gc()
 ```
 
 ```{r store selection}
+  # Aggregate to brand level
+
 # Load the store data 
   load(paste0(dir_data, "Meta-Data/Stores.RData"))
 
   store_data = setDT(stores)[,.(store_code_uc, year, dma_code, dma_descr, parent_code)]
-  store_data[, `:=`(chain_mkt = paste(parent_code, dma_descr)), 
-                by = .(dma_descr, parent_code)]
-  store_multi = unique(store_data[, .(store_code_uc, dma_descr, parent_code)])
-  store_multi[, count := .N, by = .(store_code_uc)]
-  store_multi = unique(store_multi[count!=1, store_code_uc])
-  store_data = store_data[!(store_code_uc %in% store_multi)]
+  # Use first dma for each store
+  store_data[, `:=`(dma_code = dma_code[1], dma_descr = dma_descr[1]), by = c("store_code_uc")]
+  store_data[, `:=`(nchain = length(unique(parent_code))), by = "store_code_uc"]
+  store_data = store_data[nchain==1, ]
+  store_data[, nchain:=NULL]
   # save(store_data, file="../../media/xlin0/share/xl150/store_data_1393.RData")  
 
 # Extract year; Merge movement and store data
   all_move[, `:=`(year = as.integer(format(all_move$week_end, format = "%Y")))]
-  all_move = merge(all_move, store_data, by = c("store_code_uc", "year"))
+  setkeyv(all_move, c("store_code_uc", "year"))
+  all_move = all_move[store_data, nomatch=0L]
   
 # Compute the revenue for each store; share; culmulated share ranked by store revenues
   store_revenue = all_move[, .(revenue = sum(wts_cum, na.rm = T)), by = .(store_code_uc)]
   store_revenue[, share := revenue/sum(revenue, na.rm = T)]
   setorder(store_revenue, -share)
   store_revenue[, cumshare := cumsum(share)]
+  store_revenue[, cumshare := cumshare-share]
   # save(store_revenue, file="../../media/xlin0/share/xl150/store_revenue_1393.RData")
-  top_store = store_revenue[1:min(which((store_revenue$cumshare)>=.90)), store_code_uc]  #### 80%?
+  top_store = store_revenue[cumshare<=0.90, store_code_uc]  #### 80%?
   all_move = all_move[(store_code_uc %in% top_store),]
 ```  
 
 ```{r price indexes}    
 # Calculate price indexes based on stores and dmas; 
-  all_move[, `:=`(brand_idx_imputed = imputed_cum/wts_cum,
-                  brand_idx_base = base_cum/wts_cum),
-           by = .(brand_descr_corrected, store_code_uc, dma_descr, week_end)]
-  
-  all_move[, `:=`(allOther_idx_imputed = (sum(imputed_cum)-imputed_cum)/(sum(wts_cum)-wts_cum)),
-           by = .(store_code_uc, dma_descr, week_end)]
+  all_move[, `:=`(imputed_price = imputed_cum/wts_cum,
+                  base_price = base_cum/wts_cum)]
+  # How to generate outside price index?
+  all_move[, `:=`(other_price = (sum(imputed_cum)-imputed_cum)/(sum(wts_cum)-wts_cum)),
+           by = .(store_code_uc, week_end)]
+  #drop the ones without other price index
+  all_move = all_move[!is.na(other_price)]
 ```
 
 ```{r hasuman and macro}
 # Calculate the Hausman IV
   dma_move = all_move[, .(dma_price = sum(imputed_cum)/sum(wts_cum)), 
                       by = .(brand_descr_corrected, dma_code, dma_descr, week_end)]
-  dma_move[, count := .N, by = .(brand_descr_corrected, week_end)]
-  dma_move[, hausman := (sum(dma_price) - dma_price) / (count-1), by = .(brand_descr_corrected, week_end)]
+  dma_move[, nweek := .N, by = .(brand_descr_corrected, week_end)]
+  dma_move[, hausman := (sum(dma_price) - dma_price) / (nweek-1), by = .(brand_descr_corrected, week_end)]
   dma_move[, `:=`(yearmonth = as.integer(format(dma_move$week_end, format = "%Y%m")))]
   
 # Load the macroeconomics data; Merge with dma_move
-  load("~/../../media/xlin0/share/xl150/xlin0-dropbox/CPI-SA.RData")
-  load("~/../../media/xlin0/share/xl150/xlin0-dropbox/employment.RData")
+  load("~/PassThrough/Data/Macro-Data/CPI-SA.RData")
+  load("~/PassThrough/Data/Macro-Data/employment.RData")
   cpi[, yearmonth := as.integer(gsub("-","", year_month))]
   month_emply[, yearmonth := as.integer(gsub("-","", month))]
   macro_ind = month_emply[, .(yearmonth, dma_code, unemploy_rate)]
-  macro_ind = merge(macro_ind, cpi[, .(cpi = value, yearmonth)], by = "yearmonth", all = T)
-  dma_move = merge(macro_ind, dma_move, by = c("dma_code", "yearmonth"), all.y = T)
-  dma_move = na.omit(dma_move)   # remove data whose hausman is NA, and the time period when marco-indicators are missing
+  setkey(cpi, yearmonth)
+  setkey(macro_ind, yearmonth)
+  macro_ind = macro_ind[cpi[, .(yearmonth, inflation=value)], nomatch=0L]
+  setkey(dma_move, dma_code, yearmonth)
+  setkey(macro_ind, dma_code, yearmonth)
+  dma_move = dma_move[macro_ind, nomatch=0L]
 
-# Merge movement and hausman, macro-economic data  
-  all_move = merge(all_move, dma_move[, c("count", "dma_code") := NULL], 
-                   by = c("brand_descr_corrected", "dma_descr", "week_end"))
+# Merge movement and hausman, macro-economic data 
+  dma_move[, `:=`(nweek=NULL, dma_descr=NULL)]
+  setkey(all_move, brand_descr_corrected, dma_code, week_end)
+  setkey(dma_move, brand_descr_corrected, dma_code, week_end)
+  all_move = all_move[dma_move, nomatch=0L]
 ```
 
 ```{r variables}
-# Decide if promotion exists
-  all_move[, `:=`(promotion = (brand_idx_imputed<=(0.95*brand_idx_base))*1)]
+# Decide if promotion exists --- two percent has observation of price higher than base price
+# It seems that it happens more often than the original data.
+  all_move[, `:=`(promotion = as.integer(imputed_price<=(0.95*base_price)))]
 
 # Extract month; See if it's holiday
   all_move[, `:=`(Christmas=1*is.holiday(week_end, myHoliday(year,"USChristmasDay",7,0)),
@@ -238,8 +248,8 @@ knitr::opts_chunk$set(message=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=60),
   delta = 0.1
   ref0 = 0.1
   
-  setkey(all_move, week_end)
-  all_move[, `:=`(ref_price = shift(brand_idx_imputed)), by = .(brand_descr_corrected, store_code_uc)]
+  setkey(all_move, store_code_uc, brand_descr_corrected, week_end)
+  all_move[, `:=`(ref_price = shift(imputed_price)), by = .(brand_descr_corrected, store_code_uc)]
   # all_move[, `:=`(ref_price3 = stockdi(brand_idx_imputed, delta, ref0), 
   #                       ref_price4 = stockdi(category_idx_imputed, delta, ref0)), 
   #               by = .(store_code_uc, brand_descr_corrected)]
@@ -248,15 +258,17 @@ knitr::opts_chunk$set(message=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=60),
 ```
 
 ```{r log and IV}
+### Here!!!!
 # Take the log
-  all_move[units==0, units := 1]
-  all_move[, `:=`(lsold = log(units), lprice = log(brand_idx_imputed),lref = log(ref_price), 
-                  lotherPrice = log(allOther_idx_imputed), 
-                  lhausman = log(hausman), lcpi = log(cpi), lunemploy = log(unemploy_rate))]
+# Add 1 to units
+  all_move[, units := units + 1]
+  all_move[, `:=`(lsold = log(units), lprice = log(imputed_price), lref = log(ref_price), 
+                  lotherPrice = log(other_price), 
+                  lhausman = log(hausman), lcpi = log(inflation), lunemploy = log(unemploy_rate))]
   
   all_move[, `:=`(labove_ref = lprice-lref, lbelow_ref = lprice-lref)]
-  all_move[ref_price > brand_idx_imputed, labove_ref := 0]
-  all_move[ref_price < brand_idx_imputed, lbelow_ref := 0]
+  all_move[ref_price > imputed_price, labove_ref := 0]
+  all_move[ref_price < imputed_price, lbelow_ref := 0]
   
 # Calculate the IV1
   dma_move = all_move[, .(dma_above_ref = mean(labove_ref, na.rm = T), dma_below_ref = mean(lbelow_ref, na.rm = T)), 
@@ -277,8 +289,8 @@ knitr::opts_chunk$set(message=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=60),
   
 # Calculate the IV2
   all_move[, `:=`(IV2_above_ref = lhausman-lref, IV2_below_ref = lhausman-lref)]
-  all_move[ref_price > brand_idx_imputed, IV2_above_ref := 0]
-  all_move[ref_price < brand_idx_imputed, IV2_below_ref := 0]  
+  all_move[ref_price > imputed_price, IV2_above_ref := 0]
+  all_move[ref_price < imputed_price, IV2_below_ref := 0]  
 
   # save(all_move, file="../../media/xlin0/share/xl150/move3_1393.RData")
 ```
@@ -380,10 +392,10 @@ knitr::opts_chunk$set(message=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=60),
                 "Christmas", "Thanksgiving", "Easter", "promotion")
   resultBrand = unique(result_all$brand_descr_corrected)
   
-  doHistogram(result_all, "All time")
-  doHistogram(result_0607, "2006.01-2007.12")
-  doHistogram(result_0810, "2008.06-2010.12")
-  doHistogram(result_08, "2008")
+  #doHistogram(result_all, "All time")
+  #doHistogram(result_0607, "2006.01-2007.12")
+  #doHistogram(result_0810, "2008.06-2010.12")
+  #doHistogram(result_08, "2008")
 ```
 
 ```{r}
@@ -467,10 +479,10 @@ knitr::opts_chunk$set(message=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=60),
                 "Christmas", "Thanksgiving", "Easter", "promotion")  
   resultBrand = unique(result_all$brand_descr_corrected)
   
-  doHistogram(result_all, "All time")
-  doHistogram(result_0607, "2006.01-2007.12")
-  doHistogram(result_0810, "2008.06-2010.12")
-  doHistogram(result_08, "2008")
+  #doHistogram(result_all, "All time")
+  #doHistogram(result_0607, "2006.01-2007.12")
+  #doHistogram(result_0810, "2008.06-2010.12")
+  #doHistogram(result_08, "2008")
 ```
 
 ```{r}

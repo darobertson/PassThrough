@@ -19,6 +19,13 @@ if (trial_run){
 # Top brands to be included
 top_cut = 5
 
+# Cumulative store share to be included
+store_cum_cut = 0.90
+
+# Reference Price Setting
+delta = 0.1
+ref0 = 0.1
+
 # Load Necessary Packages
 library(parallel)
 library(data.table)
@@ -30,7 +37,25 @@ setwd("~/PassThrough")
 meta_dir  = "Data/RMS-Build-2016/Meta-Data/"
 RMS_input_dir = "Data/RMS-Build-2016/RMS-Processed/Modules/"
 macro_dir = "Data/Macro-Data/"
-output_dir = "Data/Demand-Data"
+output_dir = "Data/Demand-Data/"
+fun_dir = "Scripts/bin/"
+
+# Source Functions to be used
+source(paste0(fun_dir, "AggregateBrandPrice.R"))
+source(paste0(fun_dir, "HausmanIV.R"))
+
+# Initialize Parallel Environment
+cores = detectCores(logical=TRUE)
+cl = makeCluster(cores)
+
+# Put relevant packages and functions on cluster
+invisible(clusterEvalQ(cl, library(data.table)))
+invisible(clusterEvalQ(cl, setNumericRounding(0)))
+invisible(clusterEvalQ(cl, setwd("~/PassThrough")))
+clusterExport(cl, c('AggregateBrandPrice'))
+
+# Export directories to cluster
+clusterExport(cl, c('meta_dir', 'RMS_input_dir', 'macro_dir', 'output_dir', 'fun_dir'))
 
 #---------------------------------------------------------------------------------------------------#
 
@@ -39,6 +64,13 @@ load(paste0(meta_dir, "Meta-Data-Corrected.RData"))
 
 # Load Product Characteristics Data
 load(paste0(meta_dir, "Products-Corrected.RData"))
+
+# Load the store data 
+load(paste0(meta_dir, "Stores.RData"))
+
+# Load Macro Data 
+load("~/PassThrough/Data/Macro-Data/CPI-SA.RData")
+load("~/PassThrough/Data/Macro-Data/employment.RData")
 
 # Aggregate meta data to product level 
 meta_data = meta_data[, .(productRev = sum(revenue_RMS), productWeek = sum(N_weeks_RMS)),
@@ -60,41 +92,87 @@ revenue = products[, .(brand_revenue = sum(productRev, na.rm=TRUE)),
                    by = .(product_module_code, brand_descr_corrected)]
 revenue = revenue[order(product_module_code, -brand_revenue),]
 setkey(revenue, product_module_code)
+clusterExport(cl, c('products'))
+
+# Filter Stores -- only keep certain stores
+stores = setDT(stores)[,.(store_code_uc, year, dma_code, dma_descr, parent_code)]
+# Use first dma for each store
+stores[, `:=`(dma_code = dma_code[1], dma_descr = dma_descr[1]), by = c("store_code_uc")]
+stores[, `:=`(nchain = length(unique(parent_code))), by = "store_code_uc"]
+stores = stores[nchain==1, ] # No stores which have switched chains
+stores[, nchain:=NULL]
+
+# Merge macro trend 
+cpi[, yearmonth := as.integer(gsub("-","", year_month))]
+month_emply[, yearmonth := as.integer(gsub("-","", month))]
+macro_ind = month_emply[, .(yearmonth, dma_code, unemploy_rate)]
+setkey(cpi, yearmonth)
+setkey(macro_ind, yearmonth)
+macro_ind = macro_ind[cpi[, .(yearmonth, inflation=value)], nomatch=0L]
+
 #---------------------------------------------------------------------------------------------------#
 
 # Aggregate Prices to Brand Level.
 for (module in module_list){
-  all_move_file = list.files(paste0(RMS_input_dir, module))
-  all_move = as.list(1:length(all_move_file))
-  k = 0
+  upc_files = list.files(paste0(RMS_input_dir, module))
   top_brands = revenue[.(module), brand_descr_corrected][1:top_cut]
-  for (i in all_move_file){
-    k = k+1
-    load(paste0(RMS_input_dir, module, "/", i))
-    move = move[!(is.na(base_price)|is.na(imputed_price))]
-    move[, `:=`(store_rev = sum(units*imputed_price, na.rm=T)), by = .(upc, upc_ver_uc_corrected, store_code_uc)]
-    
-    setkey(move, upc, upc_ver_uc_corrected)
-    # Half of the data is gone!
-    move = move[products, nomatch=0L]
-    
-    # Obtain per unit price and units
-    move[, `:=`(base_price = base_price/size1_amount, imputed_price = imputed_price/size1_amount,
-                units = units*size1_amount*multi)]
-    
-    # Aggregate price to brand level (only consider top brands)
-    move[!(brand_descr_corrected %in% top_brands), brand_descr_corrected := "OTHER"]
-    
-    all_move[[k]] = move[, .(base_cum= sum(store_rev*base_price, na.rm=T),
-                             imputed_cum = sum(store_rev*imputed_price, na.rm=T),
-                             wts_cum = sum(store_rev*(!is.na(imputed_price)), na.rm=T),
-                             units = sum(units, na.rm=T)), 
-                         by = .(brand_descr_corrected, store_code_uc, week_end)]
-  }
-  all_move = rbindlist(all_move)[, .(base_cum= sum(base_cum, na.rm=T),
+  clusterExport(cl, c('top_brands', 'module'))
+  move_agg = parLapply(cl, upc_files, AggregateBrandPrice)
+  move_agg = rbindlist(move_agg)[, .(base_cum= sum(base_cum, na.rm=T),
                                      imputed_cum = sum(imputed_cum, na.rm=T),
                                      wts_cum = sum(wts_cum, na.rm=T),
                                      units = sum(units, na.rm=T)), 
                                  by = .(brand_descr_corrected, store_code_uc, week_end)]
   gc()
+  
+  
+  # Define top stores
+  # Extract year; Merge movement and store data
+  move_agg[, `:=`(year = as.integer(format(week_end, format = "%Y")))]
+  setkeyv(move_agg, c("store_code_uc", "year"))
+  move_agg = move_agg[stores, nomatch=0L]
+  
+  # Compute the revenue for each store; share; culmulated share ranked by store revenues
+  store_revenue = move_agg[, .(revenue = sum(wts_cum, na.rm = T)), by = .(store_code_uc)]
+  store_revenue[, share := revenue/sum(revenue, na.rm = T)]
+  setorder(store_revenue, -share)
+  store_revenue[, cumshare := cumsum(share) - share]
+  top_store = store_revenue[cumshare<=store_cum_cut, store_code_uc]
+  move_agg = move_agg[(store_code_uc %in% top_store),] # Only keep sales from top stores
+  
+  # Calculate price indexes based on stores and dmas; 
+  move_agg[, `:=`(imputed_price = imputed_cum/wts_cum,
+                  base_price = base_cum/wts_cum)]
+  # How to generate outside price index?
+  move_agg[, `:=`(other_price = (sum(imputed_cum)-imputed_cum)/(sum(wts_cum)-wts_cum)),
+           by = .(store_code_uc, week_end)]
+  #drop the ones without other price index
+  move_agg = move_agg[!is.na(other_price)]
+  
+  
+  # Generate additional variables for promotion, seasonality and reference price
+  move_agg[, `:=`(promotion = as.integer(imputed_price<=(0.95*base_price)))]
+  
+  # Extract month; See if it's holiday
+  move_agg[, `:=`(Christmas=1*is.holiday(week_end, myHoliday(year,"USChristmasDay",7,0)),
+                  Thanksgiving=1*is.holiday(week_end, myHoliday(year,"USThanksgivingDay",7,0)),
+                  Easter=1*is.holiday(week_end, myHoliday(year,"Easter",7,0))), by = .(week_end, year)]
+  
+  # Calculate reference price
+  setkey(move_agg, store_code_uc, brand_descr_corrected, week_end)
+  move_agg[, `:=`(ref_price = shift(imputed_price)), by = .(brand_descr_corrected, store_code_uc)]
+  
+  # Generate Hausman IV
+  dma_hausman = HausmanIV(move_agg)
+  
+  # Merge Hausman with Macro Trend
+  setkey(dma_hausman, dma_code, yearmonth)
+  setkey(macro_ind, dma_code, yearmonth)
+  dma_data = dma_hausman[macro_ind, nomatch=0L]
+  
+  # Merge Hauseman + Macro Trend with Sales Data
+  setkey(move_agg, brand_descr_corrected, dma_code, week_end)
+  setkey(dma_data, brand_descr_corrected, dma_code, week_end)
+  move_agg = move_agg[dma_data, nomatch=0L]
+  
 }

@@ -26,6 +26,19 @@ store_cum_cut = 0.90
 delta = 0.1
 ref0 = 0.1
 
+# Market Level
+mkt_level = c("dma_code", "parent_code")
+
+# Number of stores to keep
+nstore_cut = 3
+
+# Observation cut per market
+nobs_cut = 300
+
+# Regression formula
+form = formula(lunits_add_1~factor(store_code_uc)+lprice+labove_ref+lbelow_ref+
+                 promotion+Christmas+Thanksgiving+Easter+lcpi+lunemployment)
+
 # Load Necessary Packages
 library(parallel)
 library(data.table)
@@ -43,6 +56,10 @@ fun_dir = "Scripts/bin/"
 # Source Functions to be used
 source(paste0(fun_dir, "AggregateBrandPrice.R"))
 source(paste0(fun_dir, "HausmanIV.R"))
+myHoliday = function(inYear, holidayName, daysBefore, daysAfter){
+  dates(as.character(seq((as.Date(holiday(inYear, holidayName))-daysBefore),
+                         as.Date(holiday(inYear, holidayName))-daysAfter ,by='day')),format="Y-M-D")
+}
 
 # Initialize Parallel Environment
 cores = detectCores(logical=TRUE)
@@ -125,7 +142,6 @@ for (module in module_list){
                                  by = .(brand_descr_corrected, store_code_uc, week_end)]
   gc()
   
-  
   # Define top stores
   # Extract year; Merge movement and store data
   move_agg[, `:=`(year = as.integer(format(week_end, format = "%Y")))]
@@ -140,6 +156,14 @@ for (module in module_list){
   top_store = store_revenue[cumshare<=store_cum_cut, store_code_uc]
   move_agg = move_agg[(store_code_uc %in% top_store),] # Only keep sales from top stores
   
+  # Filter markets with at least certain number of stores 
+  move_agg[, nstore:=length(unique(store_code_uc)), by = c(mkt_level)]
+  move_agg = move_agg[nstore>=nstore_cut, ]
+  
+  # Need to have at least certain number of Observations
+  move_agg[, nobs:=.N, by = c(mkt_level, "brand_descr_corrected")]
+  move_agg = move_agg[nobs>=nobs_cut, ]
+  
   # Calculate price indexes based on stores and dmas; 
   move_agg[, `:=`(imputed_price = imputed_cum/wts_cum,
                   base_price = base_cum/wts_cum)]
@@ -148,7 +172,6 @@ for (module in module_list){
            by = .(store_code_uc, week_end)]
   #drop the ones without other price index
   move_agg = move_agg[!is.na(other_price)]
-  
   
   # Generate additional variables for promotion, seasonality and reference price
   move_agg[, `:=`(promotion = as.integer(imputed_price<=(0.95*base_price)))]
@@ -169,10 +192,36 @@ for (module in module_list){
   setkey(dma_hausman, dma_code, yearmonth)
   setkey(macro_ind, dma_code, yearmonth)
   dma_data = dma_hausman[macro_ind, nomatch=0L]
+  dma_data[, dma_descr:=NULL]
   
   # Merge Hauseman + Macro Trend with Sales Data
   setkey(move_agg, brand_descr_corrected, dma_code, week_end)
   setkey(dma_data, brand_descr_corrected, dma_code, week_end)
   move_agg = move_agg[dma_data, nomatch=0L]
   
+  # Variable modification to prepare for regression
+  move_agg[, `:=`(lunits_add_1 = log(units+1), lprice = log(imputed_price), lref = log(ref_price),
+                  lhausman = log(hausman), lcpi = log(inflation), lunemployment = log(unemploy_rate))]
+  
+  # Separate reference price effects (above and below)
+  move_agg[, `:=`(labove_ref = ifelse(lref<lprice, lprice-lref, 0),
+                  lbelow_ref = ifelse(lref>lprice, lprice-lref, 0),
+                  IV_above_ref = ifelse(lref<lhausman, lhausman-lref, 0),
+                  IV_below_ref = ifelse(lref>lhausman, lhausman-lref, 0))]
+  move_agg[, grp_id := .GRP, by = c(mkt_level, "brand_descr_corrected")]
+  setkey(move_agg, grp_id)
+  
+  # Split move_agg and put data into each worker 
+  nworker = length(cl)
+  max_grp_id = move_agg[, max(grp_id)]
+  grp_group_list = split(1:max_grp_id, sort((1:max_grp_id)%%nworker))
+  i = 0
+  for (grp_group in grp_group_list){
+    i = i + 1
+    move_chunk = move_agg[.(grp_group), ]
+    setkey(move_chunk, grp_id)
+    clusterExport(cl[i], c("move_chunk", "grp_group"))
+  }
+  
+  # Run Regression
 }

@@ -30,6 +30,7 @@ AggregateBrandPrice = function(filename){
                            wts_cum = sum(store_rev*(!is.na(imputed_price)), na.rm=T),
                            units = sum(units, na.rm=T)), 
                        by = .(brand_descr_corrected, store_code_uc, week_end)]
-  
+  rm(move)
+  gc()
   return(move_agg)
 }

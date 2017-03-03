@@ -9,11 +9,11 @@
 rm(list = ls())
 
 # Testing status
-trial_run = TRUE
+trial_run = FALSE
 if (trial_run){
   module_list = 1393  # For testing
 } else{
-  module_list = "all" # For running
+  module_list = c(1393, 1340) # For running
 }
 
 # Top brands to be included
@@ -33,29 +33,40 @@ mkt_level = c("dma_code", "parent_code")
 nstore_cut = 3
 
 # Observation cut per market
-nobs_cut = 300
+nobs_cut = 500
 
 # Regression formula
 form = formula(lunits_add_1~factor(store_code_uc)+lprice+labove_ref+lbelow_ref+
-                 promotion+Christmas+Thanksgiving+Easter+lcpi+lunemployment)
+                 promotion+Christmas+Thanksgiving+Easter+lcpi+lunemployment+poly(tm, 7))
+# IV Regression formula
+IVform = formula(lunits_add_1~factor(store_code_uc)+lprice+labove_ref+lbelow_ref+promotion+
+                   Christmas+Thanksgiving+Easter+lcpi+lunemployment+poly(tm, 7)|factor(store_code_uc)+
+                   lhausman+IV_above_ref+IV_below_ref+promotion+Christmas+Thanksgiving+Easter+lcpi+
+                   lunemployment+poly(tm, 7))
 
 # Load Necessary Packages
 library(parallel)
+library(timeDate)
+library(chron)
 library(data.table)
 setNumericRounding(0)
-library(nloptr)
+library(bit64)
+library(AER)
 
 # Set Working Folder Path Here
 setwd("~/PassThrough")
 meta_dir  = "Data/RMS-Build-2016/Meta-Data/"
 RMS_input_dir = "Data/RMS-Build-2016/RMS-Processed/Modules/"
 macro_dir = "Data/Macro-Data/"
-output_dir = "Data/Demand-Data/"
+output_dir = "Data/Demand-Estimates/LogLog-FE/"
+iv_output_dir = "Data/Demand-Estimates/LogLog-Hausman/"
 fun_dir = "Scripts/bin/"
 
 # Source Functions to be used
 source(paste0(fun_dir, "AggregateBrandPrice.R"))
 source(paste0(fun_dir, "HausmanIV.R"))
+source(paste0(fun_dir, "LogDemandReg.R"))
+source(paste0(fun_dir, "LogHausmanIVReg.R"))
 myHoliday = function(inYear, holidayName, daysBefore, daysAfter){
   dates(as.character(seq((as.Date(holiday(inYear, holidayName))-daysBefore),
                          as.Date(holiday(inYear, holidayName))-daysAfter ,by='day')),format="Y-M-D")
@@ -68,11 +79,15 @@ cl = makeCluster(cores)
 # Put relevant packages and functions on cluster
 invisible(clusterEvalQ(cl, library(data.table)))
 invisible(clusterEvalQ(cl, setNumericRounding(0)))
+invisible(clusterEvalQ(cl, library(bit64)))
+invisible(clusterEvalQ(cl, library(timeDate)))
+invisible(clusterEvalQ(cl, library(chron)))
+invisible(clusterEvalQ(cl, library(AER)))
 invisible(clusterEvalQ(cl, setwd("~/PassThrough")))
-clusterExport(cl, c('AggregateBrandPrice'))
+clusterExport(cl, c('AggregateBrandPrice', 'LogDemandReg', 'LogHausmanIVReg'))
 
-# Export directories to cluster
-clusterExport(cl, c('meta_dir', 'RMS_input_dir', 'macro_dir', 'output_dir', 'fun_dir'))
+# Export directories and regression forms to cluster
+clusterExport(cl, c('meta_dir', 'RMS_input_dir', 'macro_dir', 'output_dir', 'fun_dir', 'form', 'IVform'))
 
 #---------------------------------------------------------------------------------------------------#
 
@@ -133,8 +148,11 @@ macro_ind = macro_ind[cpi[, .(yearmonth, inflation=value)], nomatch=0L]
 for (module in module_list){
   upc_files = list.files(paste0(RMS_input_dir, module))
   top_brands = revenue[.(module), brand_descr_corrected][1:top_cut]
+  top_brands = top_brands[!grepl("CTL BR", top_brands)]
   clusterExport(cl, c('top_brands', 'module'))
   move_agg = parLapply(cl, upc_files, AggregateBrandPrice)
+  gc()
+  invisible(clusterEvalQ(cl, gc()))
   move_agg = rbindlist(move_agg)[, .(base_cum= sum(base_cum, na.rm=T),
                                      imputed_cum = sum(imputed_cum, na.rm=T),
                                      wts_cum = sum(wts_cum, na.rm=T),
@@ -193,6 +211,8 @@ for (module in module_list){
   setkey(macro_ind, dma_code, yearmonth)
   dma_data = dma_hausman[macro_ind, nomatch=0L]
   dma_data[, dma_descr:=NULL]
+  setkey(dma_data, week_end)
+  dma_data[, tm:=.GRP, by = "week_end"]
   
   # Merge Hauseman + Macro Trend with Sales Data
   setkey(move_agg, brand_descr_corrected, dma_code, week_end)
@@ -209,6 +229,7 @@ for (module in module_list){
                   IV_above_ref = ifelse(lref<lhausman, lhausman-lref, 0),
                   IV_below_ref = ifelse(lref>lhausman, lhausman-lref, 0))]
   move_agg[, grp_id := .GRP, by = c(mkt_level, "brand_descr_corrected")]
+  grp_info = move_agg[, .(grp_id = grp_id[1]), by = c(mkt_level, "brand_descr_corrected")]
   setkey(move_agg, grp_id)
   
   # Split move_agg and put data into each worker 
@@ -222,6 +243,38 @@ for (module in module_list){
     setkey(move_chunk, grp_id)
     clusterExport(cl[i], c("move_chunk", "grp_group"))
   }
+  rm(move_agg)
+  gc()
   
-  # Run Regression
+  # Cluster Evaluation
+  estimates = invisible(clusterEvalQ(cl, LogDemandReg()))
+  estimates = rbindlist(estimates)
+  estimates[, `:=`(var_name = ifelse(var_name=="(Intercept)", "intercept", var_name))]
+  estimates[, `:=`(var_name = ifelse(grepl("store_code_uc", var_name), 
+                                     substr(var_name,22,nchar(var_name)), var_name))]
+  
+  # Merge estimates with market identifiers
+  setkey(estimates, grp_id)
+  setkey(grp_info, grp_id)
+  estimates = grp_info[estimates]
+  setnames(estimates, c("Estimate", "Std. Error", "t value", "Pr(>|t|)"), c("bhat", "se", "tval", "pval"))
+  save(estimates, file = paste0(output_dir, module, ".RData"))
+  
+  # IV Cluster Evaluation
+  estimates = invisible(clusterEvalQ(cl, LogHausmanIVReg()))
+  estimates = rbindlist(estimates)
+  estimates[, `:=`(var_name = ifelse(var_name=="(Intercept)", "intercept", var_name))]
+  estimates[, `:=`(var_name = ifelse(grepl("store_code_uc", var_name), 
+                                     substr(var_name,22,nchar(var_name)), var_name))]
+  
+  # Merge estimates with market identifiers
+  setkey(estimates, grp_id)
+  setkey(grp_info, grp_id)
+  estimates = grp_info[estimates]
+  setnames(estimates, c("Estimate", "Std. Error", "t value", "Pr(>|t|)"), c("bhat", "se", "tval", "pval"))
+  save(estimates, file = paste0(iv_output_dir, module, ".RData"))
+  
+  # Clean up worker workspace
+  invisible(clusterEvalQ(cl, rm(move_chunk)))
+  invisible(clusterEvalQ(cl, gc()))
 }

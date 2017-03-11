@@ -1,6 +1,6 @@
 #####################################################################################################
 #
-# Compute the Fixed Effect Demand Model with Cross Sectional Units
+# Estimate the Nested Logit Demand Model with Market Defined as Stores
 # Xiliang Lin
 # Febuary, 2016
 #
@@ -9,7 +9,7 @@
 rm(list = ls())
 
 # Testing status
-trial_run = FALSE
+trial_run = TRUE
 if (trial_run){
   module_list = 1393  # For testing
 } else{
@@ -20,14 +20,20 @@ if (trial_run){
 top_cut = 5
 
 # Cumulative store share to be included
-store_cum_cut = 0.90
+store_cum_cut = 0.85
 
 # Reference Price Setting
 delta = 0.1
 ref0 = 0.1
 
 # Market Level
+# Elascity is homogeneous within a market
 mkt_level = c("dma_code", "parent_code")
+mkt_s_level = c("store_code_uc") # level to compute market share
+t_level = c("week_end") # time level to compute market share
+
+# Market Size Definition as Penetration rate at peak demand 
+prate = 0.75
 
 # Number of stores to keep
 nstore_cut = 3
@@ -36,13 +42,20 @@ nstore_cut = 3
 nobs_cut = 500
 
 # Regression formula
-form = formula(lunits_add_1~factor(store_code_uc)+lprice+labove_ref+lbelow_ref+lother_price+
-                 promotion+Christmas+Thanksgiving+Easter+lcpi+lunemployment+poly(tm, 7))
+# form = formula(lshare ~ factor(brand_descr_corrected) + labove_ref + lbelow_ref + promotion + lprice + Christmas
+#                  +Thanksgiving+Easter+lcpi+lunemployment+poly(tm, 5)+factor(store_code_uc)+lcond_share)
+form = formula(lshare ~ factor(brand_descr_corrected) + promotion + lprice + Christmas
+                 +Thanksgiving+Easter+lcpi+lunemployment+poly(tm, 5)+factor(store_code_uc)+lcond_share)
+
 # IV Regression formula
-IVform = formula(lunits_add_1~factor(store_code_uc)+lprice+labove_ref+lbelow_ref+lother_price+promotion+
-                   Christmas+Thanksgiving+Easter+lcpi+lunemployment+poly(tm, 7)|factor(store_code_uc)+
-                   lhausman+IV_above_ref+IV_below_ref+lother_price+promotion+Christmas+Thanksgiving+Easter+lcpi+
-                   lunemployment+poly(tm, 7))
+#IVform = formula(lshare ~ factor(brand_descr_corrected) + labove_ref + lbelow_ref + promotion + lprice + Christmas+
+#                   Thanksgiving+Easter+lcpi+lunemployment+poly(tm, 5)+factor(store_code_uc)+lcond_share|
+#                   factor(brand_descr_corrected) + IV_above_ref + IV_below_ref + promotion + lhausman + Christmas+
+#                   Thanksgiving+Easter+lcpi+lunemployment+poly(tm, 5)+factor(store_code_uc)+lcond_share)
+IVform = formula(lshare ~ factor(brand_descr_corrected) + promotion + lprice + Christmas+
+                  Thanksgiving+Easter+lcpi+lunemployment+poly(tm, 5)+factor(store_code_uc)+lcond_share|
+                  factor(brand_descr_corrected) + promotion + lhausman + Christmas+
+                  Thanksgiving+Easter+lcpi+lunemployment+poly(tm, 5)+factor(store_code_uc)+lcond_share)
 
 # Load Necessary Packages
 library(parallel)
@@ -58,8 +71,8 @@ setwd("~/PassThrough")
 meta_dir  = "Data/RMS-Build-2016/Meta-Data/"
 RMS_input_dir = "Data/RMS-Build-2016/RMS-Processed/Modules/"
 macro_dir = "Data/Macro-Data/"
-output_dir = "Data/Demand-Estimates/LogLog-FE/"
-iv_output_dir = "Data/Demand-Estimates/LogLog-Hausman/"
+output_dir = "Data/Demand-Estimates/Nested-Logit-FE/"
+iv_output_dir = "Data/Demand-Estimates/Nested-Logit-Hausman/"
 fun_dir = "Scripts/bin/"
 
 # Source Functions to be used
@@ -67,6 +80,7 @@ source(paste0(fun_dir, "AggregateBrandPrice.R"))
 source(paste0(fun_dir, "HausmanIV.R"))
 source(paste0(fun_dir, "LogDemandReg.R"))
 source(paste0(fun_dir, "LogHausmanIVReg.R"))
+source(paste0(fun_dir, "shareGen.R"))
 myHoliday = function(inYear, holidayName, daysBefore, daysAfter){
   dates(as.character(seq((as.Date(holiday(inYear, holidayName))-daysBefore),
                          as.Date(holiday(inYear, holidayName))-daysAfter ,by='day')),format="Y-M-D")
@@ -185,12 +199,7 @@ for (module in module_list){
   # Calculate price indexes based on stores and dmas; 
   move_agg[, `:=`(imputed_price = imputed_cum/wts_cum,
                   base_price = base_cum/wts_cum)]
-  # How to generate outside price index?
-  move_agg[, `:=`(other_price = (sum(imputed_cum)-imputed_cum)/(sum(wts_cum)-wts_cum)),
-           by = .(store_code_uc, week_end)]
-  #drop the ones without other price index
-  move_agg = move_agg[!is.na(other_price)]
-  
+
   # Generate additional variables for promotion, seasonality and reference price
   move_agg[, `:=`(promotion = as.integer(imputed_price<=(0.95*base_price)))]
   
@@ -219,18 +228,25 @@ for (module in module_list){
   setkey(dma_data, brand_descr_corrected, dma_code, week_end)
   move_agg = move_agg[dma_data, nomatch=0L]
   
+  # Generate market share 
+  shareGen(move_agg, mkt_level = mkt_s_level, timevar = t_level, pen_rate = prate)
+  
+  # Drop 0 market share products and markets -- not ideal but a very small percentage
+  # Or no reference price
+  # Drop other brand from the equation -- it's a composite
+  move_agg = move_agg[s>0 & !is.na(ref_price) & !(brand_descr_corrected=="OTHER")]
+  
   # Variable modification to prepare for regression
-  move_agg[, `:=`(lunits_add_1 = log(units+1), lprice = log(imputed_price), lref = log(ref_price), 
-                  lother_price = log(other_price), lhausman = log(hausman), lcpi = log(inflation), 
-                  lunemployment = log(unemploy_rate))]
+  move_agg[, `:=`(lshare = log(s)-log(s0), lcond_share = log(sg), lprice = log(imputed_price), lref = log(ref_price), 
+                  lhausman = log(hausman), lcpi = log(inflation), lunemployment = log(unemploy_rate))]
   
   # Separate reference price effects (above and below)
   move_agg[, `:=`(labove_ref = ifelse(lref<lprice, lprice-lref, 0),
                   lbelow_ref = ifelse(lref>lprice, lref-lprice, 0),
                   IV_above_ref = ifelse(lref<lhausman, lhausman-lref, 0),
                   IV_below_ref = ifelse(lref>lhausman, lref-lhausman, 0))]
-  move_agg[, grp_id := .GRP, by = c(mkt_level, "brand_descr_corrected")]
-  grp_info = move_agg[, .(grp_id = grp_id[1]), by = c(mkt_level, "brand_descr_corrected")]
+  move_agg[, grp_id := .GRP, by = c(mkt_level)]
+  grp_info = move_agg[, .(grp_id = grp_id[1]), by = c(mkt_level)]
   setkey(move_agg, grp_id)
   
   # Split move_agg and put data into each worker 
@@ -244,7 +260,6 @@ for (module in module_list){
     setkey(move_chunk, grp_id)
     clusterExport(cl[i], c("move_chunk", "grp_group"))
   }
-  rm(move_agg)
   gc()
   
   # Cluster Evaluation
@@ -253,13 +268,28 @@ for (module in module_list){
   estimates[, `:=`(var_name = ifelse(var_name=="(Intercept)", "intercept", var_name))]
   estimates[, `:=`(var_name = ifelse(grepl("store_code_uc", var_name), 
                                      substr(var_name,22,nchar(var_name)), var_name))]
+  estimates[, `:=`(var_name = ifelse(grepl("brand_descr_corrected", var_name), 
+                                     substr(var_name,30,nchar(var_name)), var_name))]
   
   # Merge estimates with market identifiers
   setkey(estimates, grp_id)
   setkey(grp_info, grp_id)
   estimates = grp_info[estimates]
   setnames(estimates, c("Estimate", "Std. Error", "t value", "Pr(>|t|)"), c("bhat", "se", "tval", "pval"))
-  save(estimates, file = paste0(output_dir, module, ".RData"))
+
+  # Estimate elasticity
+  setkey(estimates, grp_id)
+  setkey(move_agg, grp_id)
+  move_agg = move_agg[estimates[var_name=="lprice", .(grp_id, bhat)], nomatch=0L]
+  setnames(move_agg, "bhat", "pcoef")
+  move_agg = move_agg[estimates[var_name=="lcond_share", .(grp_id, bhat)], nomatch=0L]
+  setnames(move_agg, "bhat", "rho")
+  move_agg[, own_elast := pcoef * (1/(1-rho) - sg * rho/(1-rho) - s)]
+  move_agg[, cross_elast := pcoef * (- sg * rho/(1-rho) - s)]
+  elastcities = move_agg[, .(own_elast = mean(own_elast),
+                             cross_elast = mean(cross_elast)), 
+                         by = c("grp_id", "dma_code", "parent_code", "brand_descr_corrected")]
+  save(estimates, elastcities, file = paste0(output_dir, module, ".RData"))
   
   # IV Cluster Evaluation
   estimates = invisible(clusterEvalQ(cl, LogHausmanIVReg()))
@@ -267,13 +297,29 @@ for (module in module_list){
   estimates[, `:=`(var_name = ifelse(var_name=="(Intercept)", "intercept", var_name))]
   estimates[, `:=`(var_name = ifelse(grepl("store_code_uc", var_name), 
                                      substr(var_name,22,nchar(var_name)), var_name))]
+  estimates[, `:=`(var_name = ifelse(grepl("brand_descr_corrected", var_name), 
+                                     substr(var_name,30,nchar(var_name)), var_name))]
   
   # Merge estimates with market identifiers
   setkey(estimates, grp_id)
   setkey(grp_info, grp_id)
   estimates = grp_info[estimates]
   setnames(estimates, c("Estimate", "Std. Error", "t value", "Pr(>|t|)"), c("bhat", "se", "tval", "pval"))
-  save(estimates, file = paste0(iv_output_dir, module, ".RData"))
+
+  # Estimate elasticity
+  move_agg[, `:=`(pcoef=NULL, rho=NULL, own_elast=NULL, cross_elast=NULL)]
+  setkey(estimates, grp_id)
+  setkey(move_agg, grp_id)
+  move_agg = move_agg[estimates[var_name=="lprice", .(grp_id, bhat)], nomatch=0L]
+  setnames(move_agg, "bhat", "pcoef")
+  move_agg = move_agg[estimates[var_name=="lcond_share", .(grp_id, bhat)], nomatch=0L]
+  setnames(move_agg, "bhat", "rho")
+  move_agg[, own_elast := pcoef * (1/(1-rho) - sg * rho/(1-rho) - s)]
+  move_agg[, cross_elast := pcoef * (- sg * rho/(1-rho) - s)]
+  elastcities = move_agg[, .(own_elast = mean(own_elast),
+                             cross_elast = mean(cross_elast)), 
+                         by = c("grp_id", "dma_code", "parent_code", "brand_descr_corrected")]
+  save(estimates, elastcities, file = paste0(iv_output_dir, module, ".RData"))
   
   # Clean up worker workspace
   invisible(clusterEvalQ(cl, rm(move_chunk)))

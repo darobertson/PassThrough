@@ -1,0 +1,160 @@
+---
+title: "Nested Logit Demand Graphs - All Purpose Flour"
+author: "Xiliang Lin"
+date: "3/9/2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(dev = 'pdf')
+knitr::opts_knit$set(root.dir = '~/PassThrough')
+estimate_dir = "Data/Demand-Estimates/Nested-Logit-FE/"
+iv_estimate_dir = "Data/Demand-Estimates/Nested-Logit-Hausman/"
+fun_dir = "Scripts/bin/"
+graph_dir = "Results/Demand-Estimates/Tabfigs"
+module = 1393
+
+# Useful Libraries
+library(data.table)
+setNumericRounding(0)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+```
+
+## Demand Specification
+In this excercise, I estimate demand based on a panel specification. The demand is estimated at market level with defined as the combination of DMA and Chain. We restrict to market with at least 3 stores in the top 90 percent of stores in terms of sales in the category. For each market and brand $k$, we run the regression
+$$ \begin{aligned}
+u_{ijt} =& \alpha_j + \beta_1 \ln p_{ijt} + \beta_2 \mathbb{I}_{p_{ijt}\ge p_{sj,t-1}}(\ln p_{ijt} - \ln p_{sj,t-1}) + \beta_3 \mathbb{I}_{p_{ijt} < p_{sj,t-1}} (\ln p_{ijt} - \ln p_{sj,t-1}) \\ 
+& + \beta_4 \text{promotion} + \xi_{jt} + \varepsilon_{ijt}
+\end{aligned} $$
+
+```{r}
+cvars = c("lprice", "promotion", "Christmas", "Thanksgiving", "Easter")
+clabel = c("Price", "Promotion", "Christmas", "Thanksgiving", "Easter")
+```
+
+## Demand Estimates Using Prices - No Instrumental Variables
+```{r, include=FALSE}
+# Load Data
+load(paste0(estimate_dir, module, ".RData"))
+setkey(estimates, var_name, grp_id)
+# Throw away 1% data for ploting purpose
+estimates[, `:=`(bhat_min = quantile(bhat, 0.005),
+                 bhat_max = quantile(bhat, 0.995)), 
+          by = c("var_name")]
+estimates = estimates[bhat_min<=bhat & bhat<=bhat_max, ]
+setkey(elastcities, brand_descr_corrected)
+```
+
+Plot the estimates regardless of statistical significance. Results are shown below:
+
+```{r, fig.width = 7, fig.height = 9, echo=FALSE, comment=NA, message=FALSE}
+gph = as.list(NULL)
+nr = ceiling(length(cvars)/2)
+nc = ceiling(length(cvars)/nr)
+k = 0
+for (vn in cvars){
+  k = k+1
+  mdx = round(estimates[.(vn), median(bhat)], 3)
+  gph[[k]] = ggplot(estimates[.(vn), ], aes(x=bhat))+geom_histogram(fill="skyblue", bins=20)+ theme_bw() + 
+    theme(axis.title=element_text(size=8))+xlab(clabel[k]) + geom_vline(xintercept = mdx, color="red")
+}
+multplot = marrangeGrob(gph, ncol=nc, nrow=nr);
+ggsave(paste(graph_dir, "/figs/NestedLogit-NoIV.pdf", sep=""), multplot, width=6, height=12);
+print(multplot)
+```
+
+Elasticity Estimates:
+
+```{r, fig.width = 7, fig.height = 9, echo=FALSE, comment=NA, message=FALSE}
+bnames = setdiff(unique(elastcities$brand_descr_corrected), "OTHER")
+gph = as.list(NULL)
+nr = ceiling(length(bnames)/2)
+nc = ceiling(length(bnames)/nr)
+k = 0
+for (b in bnames){
+  k = k+1
+  mdx = round(elastcities[.(b), median(own_elast)], 3)
+  gph[[k]] = ggplot(elastcities[.(b), ], aes(x=own_elast))+geom_histogram(fill="skyblue", bins=20)+ theme_bw() + 
+  theme(axis.title=element_text(size=8))+xlab(b) + geom_vline(xintercept = mdx, color="red")
+}
+multplot = marrangeGrob(gph, ncol=nc, nrow=nr, top = "Own Price Elasticity")
+ggsave(paste(graph_dir, "/figs/NestedLogit-Elast-NoIV.pdf", sep=""), multplot, width=6, height=12)
+print(multplot)
+```
+
+```{r, fig.width = 7, fig.height = 9, echo=FALSE, comment=NA, message=FALSE}
+k = 0
+for (b in bnames){
+  k = k+1
+  mdx = round(elastcities[.(b), median(cross_elast)], 3)
+  gph[[k]] = ggplot(elastcities[.(b), ], aes(x=cross_elast))+geom_histogram(fill="skyblue", bins=20)+ theme_bw() + 
+  theme(axis.title=element_text(size=8))+xlab(b) + geom_vline(xintercept = mdx, color="red")
+}
+multplot = marrangeGrob(gph, ncol=nc, nrow=nr, top = "Cross Price Elasticity")
+ggsave(paste(graph_dir, "/figs/NestedLogit-CrElast-NoIV.pdf", sep=""), multplot, width=6, height=12)
+print(multplot)
+```
+
+## Demand Estimates Using Prices - Hausman Instruments
+```{r, include=FALSE}
+# Load Data
+load(paste0(iv_estimate_dir, module, ".RData"))
+setkey(estimates, var_name, grp_id)
+# Throw away 1% data for ploting purpose
+estimates[, `:=`(bhat_min = quantile(bhat, 0.005),
+                 bhat_max = quantile(bhat, 0.995)), 
+          by = c("var_name")]
+estimates = estimates[bhat_min<=bhat & bhat<=bhat_max, ]
+setkey(elastcities, brand_descr_corrected)
+```
+
+```{r, fig.width = 7, fig.height = 9, echo=FALSE, comment=NA, message=FALSE}
+gph = as.list(NULL)
+nr = ceiling(length(cvars)/2)
+nc = ceiling(length(cvars)/nr)
+k = 0
+for (vn in cvars){
+  k = k+1
+  mdx = round(estimates[.(vn), median(bhat)], 3)
+  gph[[k]] = ggplot(estimates[.(vn), ], aes(x=bhat))+geom_histogram(fill="skyblue", bins=20)+ theme_bw() + 
+    theme(axis.title=element_text(size=8))+xlab(clabel[k]) + geom_vline(xintercept = mdx, color="red")
+}
+multplot = marrangeGrob(gph, ncol=nc, nrow=nr);
+ggsave(paste(graph_dir, "/figs/NestedLogit-HausmanIV.pdf", sep=""), multplot, width=6, height=12);
+print(multplot)
+```
+
+Elasticities
+
+```{r, fig.width = 7, fig.height = 9, echo=FALSE, comment=NA, message=FALSE}
+bnames = setdiff(unique(elastcities$brand_descr_corrected), "OTHER")
+gph = as.list(NULL)
+nr = ceiling(length(bnames)/2)
+nc = ceiling(length(bnames)/nr)
+k = 0
+for (b in bnames){
+  k = k+1
+  mdx = round(elastcities[.(b), median(own_elast)], 3)
+  gph[[k]] = ggplot(elastcities[.(b), ], aes(x=own_elast))+geom_histogram(fill="skyblue", bins=20)+ theme_bw() + 
+  theme(axis.title=element_text(size=8))+xlab(b) + geom_vline(xintercept = mdx, color="red")
+}
+multplot = marrangeGrob(gph, ncol=nc, nrow=nr, top = "Own Price Elasticity")
+ggsave(paste(graph_dir, "/figs/NestedLogit-Elast-NoIV.pdf", sep=""), multplot, width=6, height=12)
+print(multplot)
+```
+
+```{r, fig.width = 7, fig.height = 9, echo=FALSE, comment=NA, message=FALSE}
+k = 0
+for (b in bnames){
+  k = k+1
+  mdx = round(elastcities[.(b), median(cross_elast)], 3)
+  gph[[k]] = ggplot(elastcities[.(b), ], aes(x=cross_elast))+geom_histogram(fill="skyblue", bins=20)+ theme_bw() + 
+  theme(axis.title=element_text(size=8))+xlab(b) + geom_vline(xintercept = mdx, color="red")
+}
+multplot = marrangeGrob(gph, ncol=nc, nrow=nr, top = "Cross Price Elasticity")
+ggsave(paste(graph_dir, "/figs/NestedLogit-CrElast-NoIV.pdf", sep=""), multplot, width=6, height=12)
+print(multplot)

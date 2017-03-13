@@ -9,7 +9,7 @@
 rm(list = ls())
 
 # Testing status
-trial_run = TRUE
+trial_run = FALSE
 if (trial_run){
   module_list = 1393  # For testing
 } else{

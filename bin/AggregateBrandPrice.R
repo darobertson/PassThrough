@@ -11,8 +11,8 @@ AggregateBrandPrice = function(filename){
   }
   
   load(paste0(RMS_input_dir, module, "/", filename))
-  move = move[!(is.na(base_price)|is.na(imputed_price))]
   if (nrow(move) == 0) return(data.table(NULL))
+  move = move[!(is.na(base_price)|is.na(imputed_price))]
   move[, `:=`(store_rev = sum(units*imputed_price, na.rm=T)), by = .(upc, upc_ver_uc_corrected, store_code_uc)]
   
   setkey(move, upc, upc_ver_uc_corrected)

@@ -13,8 +13,12 @@ trial_run = FALSE
 if (trial_run){
   module_list = 1393  # For testing
 } else{
-  module_list = c(1393, 1340) # For running
+  module_list = c(1362, 1344, 7460, 2672, 3603, 1323, 4000, 
+                  7260, 5000, 1326, 7340, 1040, 1329, 7734, 
+                  1330, 1072, 1354, 1393, 1367, 1349) # For running
 }
+# Running on grid? 
+grid_run = TRUE
 
 # Top brands to be included
 top_cut = 5
@@ -68,8 +72,13 @@ library(AER)
 
 # Set Working Folder Path Here
 setwd("~/PassThrough")
-meta_dir  = "Data/RMS-Build-2016/Meta-Data/"
-RMS_input_dir = "Data/RMS-Build-2016/RMS-Processed/Modules/"
+if (grid_run) {
+  meta_dir  = "/home/xlin0/data/RMS-Build-2016/Meta-Data/"
+  RMS_input_dir = "/home/xlin0/data/RMS-Build-2016/RMS-Processed/Modules/"
+} else{
+  meta_dir  = "Data/RMS-Build-2016/Meta-Data/"
+  RMS_input_dir = "Data/RMS-Build-2016/RMS-Processed/Modules/"
+}
 macro_dir = "Data/Macro-Data/"
 output_dir = "Data/Demand-Estimates/Nested-Logit-FE/"
 iv_output_dir = "Data/Demand-Estimates/Nested-Logit-Hausman/"

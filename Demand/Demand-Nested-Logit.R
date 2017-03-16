@@ -140,9 +140,9 @@ products = products[, .(brand_descr_corrected = brand_descr_corrected[1], multi=
                     by = c("upc", "upc_ver_uc_corrected", "product_module_code")]
 products = products[product_module_code%in%module_list, ]
 # Only keep the dominant size in the module
-products[, mode_size1_units := names(sort(-table(x)))[1], by = "product_module_code"]
+products[, mode_size1_units := names(sort(-table(size1_units)))[1], by = "product_module_code"]
 products = products[size1_units==mode_size1_units, ]
-products[, size1_units := size1_units * multi]
+products[, size1_amount = size1_amount * multi]
 
 # Merge data; find the top brand in each category
 setkey(products, upc, upc_ver_uc_corrected)

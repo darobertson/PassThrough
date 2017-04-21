@@ -9,7 +9,7 @@
 rm(list = ls())
 
 # Testing status
-trial_run = FALSE
+trial_run = TRUE
 if (trial_run){
   module_list = 1393  # For testing
 } else{
@@ -18,7 +18,7 @@ if (trial_run){
                   1330, 1072, 1354, 1393, 1367, 1349) # For running
 }
 # Running on grid? 
-grid_run = TRUE
+grid_run = FALSE
 
 # Top brands to be included
 top_cut = 5
@@ -241,8 +241,11 @@ for (module in module_list){
   setkey(dma_data, brand_descr_corrected, dma_code, week_end)
   move_agg = move_agg[dma_data, nomatch=0L]
   
-  # Generate market share 
-  shareGen(move_agg, mkt_level = mkt_s_level, timevar = t_level, pen_rate = prate)
+  # Generate market share based on assumed penetration rate.  
+  # shareGen(move_agg, mkt_level = mkt_s_level, timevar = t_level, pen_rate = prate)
+  
+  # Generate market share based on RA collected data.
+  
   
   # Drop 0 market share products and markets -- not ideal but a very small percentage
   # Or no reference price
